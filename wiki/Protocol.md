@@ -11,8 +11,9 @@ Firelin `serve` 模式默认在 `127.0.0.1:8755` 提供一个小型 HTTP API（�
 | `/health` | GET | none / 无 | Liveness probe. Returns / 返回 `{"ok":true}` |
 | `/invoke-actions` | GET | Bearer (optional / 可选) | Action catalog + param hints + `scan_authorized` state / 动作目录、参数说明与扫描授权状态 |
 | `/invoke` | POST | Bearer (optional / 可选) | BIT Remote protocol entry / BIT Remote 协议入口 |
+| `/mcp`, `/` | POST | Bearer (optional / 可选) | MCP Streamable HTTP JSON-RPC (v0.2.0+) / MCP 流式 HTTP JSON-RPC（v0.2.0 起） |
 
-With `serve --token <TOKEN>`, `/invoke` and `/invoke-actions` require `Authorization: Bearer <TOKEN>` (401 otherwise). `/health` stays open. / 使用 `serve --token <TOKEN>` 后，`/invoke` 与 `/invoke-actions` 需要 `Authorization: Bearer <TOKEN>`（否则 401）；`/health` 保持开放。
+With `serve --token <TOKEN>`, `/invoke`, `/invoke-actions` and the MCP endpoints require `Authorization: Bearer <TOKEN>` (401 otherwise). `/health` stays open. / 使用 `serve --token <TOKEN>` 后，`/invoke`、`/invoke-actions` 与 MCP 端点需要 `Authorization: Bearer <TOKEN>`（否则 401）；`/health` 保持开放。
 
 ## Scan authorization / 扫描授权
 
@@ -53,6 +54,18 @@ Errors / 错误:
 | 401 | Missing or invalid Bearer token / 缺失或错误的 Bearer token |
 | 403 | Scan action on a serve started without authorization / 未授权启动的 serve 收到扫描动作 |
 | 500 | Internal error / 内部错误 |
+
+## MCP (Streamable HTTP, v0.2.0+)
+
+`POST /mcp` (and `POST /`) speak JSON-RPC 2.0, wire-compatible with BIT's MCP client / `POST /mcp`（与 `POST /`）提供 JSON-RPC 2.0，与 BIT 的 MCP 客户端同线协议:
+
+- `initialize` → `{protocolVersion, capabilities:{tools:{listChanged:false}}, serverInfo:{name:"firelin"}}` + `Mcp-Session-Id` response header / 响应头。
+- `notifications/*` (or any id-less message / 或任何无 id 消息) → HTTP 202, empty body / 空响应体。
+- `tools/list` → the five actions as five tools with JSON-Schema `inputSchema` / 五个动作以五个工具暴露（带 JSON Schema）。
+- `tools/call` → `{content:[{type:"text", text:<json string>}], isError}` — action failures (including the scan gate) are `isError: true` results, never transport errors / 动作失败（含扫描门控）以 `isError: true` 结果返回，而非传输层错误。
+- `ping` → `{}`; unknown method → JSON-RPC `-32601`; unknown tool → `-32602`; parse error → `-32700`.
+
+Scan gating over MCP / MCP 侧的扫描门控: calling `portscan` / `subdns` / `dirscan` on an unauthorized server yields `isError: true` with text explaining `--yes-i-have-permission` / `FIRELIN_I_HAVE_PERMISSION=yes` / 未授权服务上的扫描调用返回 `isError: true`，文本说明解锁标志。
 
 ## Example session / 示例会话
 

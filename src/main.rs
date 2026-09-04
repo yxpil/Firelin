@@ -9,6 +9,7 @@ mod cidr;
 mod dirscan;
 mod dns;
 mod fingerprint;
+mod mcp;
 mod ports;
 mod portscan;
 mod serve;

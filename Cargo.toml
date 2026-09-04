@@ -1,6 +1,6 @@
 [package]
 name = "firelin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Agent-oriented network penetration testing toolkit around the BIT ecosystem: TCP port scan, DNS subdomain enumeration, directory enumeration, HTTP fingerprint (authorized use only)"
 license = "Apache-2.0"

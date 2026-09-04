@@ -1,16 +1,20 @@
-//! `serve` mode: BIT Remote-protocol-compatible HTTP API.
+//! `serve` mode: BIT Remote-protocol-compatible HTTP API plus MCP.
 //!
 //! Endpoints: `GET /health` (liveness, never token-protected),
-//! `GET /invoke-actions` (machine-readable action catalog) and
+//! `GET /invoke-actions` (machine-readable action catalog),
 //! `POST /invoke` (BIT Remote entry point, routing on `params.action`,
-//! fallback `params.tool`).
+//! fallback `params.tool`) and the MCP Streamable-HTTP JSON-RPC surface on
+//! `POST /` and `POST /mcp` (see [`crate::mcp`]).
+//!
+//! Both protocols share one action funnel ([`dispatch_action`]), so results
+//! and authorization behavior always agree.
 //!
 //! Scan actions (`portscan`, `subdns`, `dirscan`) are gated at the server
 //! level: unless the process was started with `--yes-i-have-permission` (or
-//! `FIRELIN_I_HAVE_PERMISSION=yes`), they answer HTTP 403. `fingerprint` and
-//! `cidr` are read-only/single-request helpers and always available.
-//! `--token` adds optional Bearer protection on every endpoint except
-//! `/health`.
+//! `FIRELIN_I_HAVE_PERMISSION=yes`), they answer HTTP 403 (`/invoke`) or an
+//! `isError` result (`/mcp`). `fingerprint` and `cidr` are
+//! read-only/single-request helpers and always available. `--token` adds
+//! optional Bearer protection on every endpoint except `/health`.
 
 use crate::{cidr, dirscan, fingerprint, ports, portscan, subdns};
 use anyhow::{Context, Result};
@@ -52,6 +56,7 @@ pub async fn run(
         .route("/health", get(health))
         .route("/invoke-actions", get(invoke_actions))
         .route("/invoke", post(invoke))
+        .merge(crate::mcp::routes())
         .with_state(state);
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -155,31 +160,62 @@ async fn invoke(
             "missing params.action (expected one of: portscan, subdns, dirscan, fingerprint, cidr)",
         ));
     }
-    if SCAN_ACTIONS.contains(&action.as_str()) && !state.scan_authorized {
-        return Err((
+    match dispatch_action(&action, &params, state.scan_authorized).await {
+        Ok(value) => Ok(Json(value)),
+        Err(ActionError::Bad(message)) => Err(bad_request(message)),
+        Err(ActionError::Forbidden(message)) => Err((
             StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "scan_action_forbidden",
-                "message": format!(
-                    "action '{action}' requires scan authorization; restart firelin serve with --yes-i-have-permission or set FIRELIN_I_HAVE_PERMISSION=yes"
-                )
-            })),
-        ));
-    }
-    match action.as_str() {
-        "portscan" => invoke_portscan(&params).await,
-        "subdns" => invoke_subdns(&params).await,
-        "dirscan" => invoke_dirscan(&params).await,
-        "fingerprint" => invoke_fingerprint(&params).await,
-        "cidr" => invoke_cidr(&params),
-        other => Err(bad_request(format!(
-            "unknown action '{other}' — expected one of: {}",
-            ACTIONS.join(", ")
-        ))),
+            Json(json!({ "error": "scan_action_forbidden", "message": message })),
+        )),
+        Err(ActionError::Internal(message)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": message })),
+        )),
     }
 }
 
-async fn invoke_portscan(params: &Value) -> Result<Json<Value>, ApiError> {
+/// Why an action call failed. `Bad` maps to HTTP 400, `Forbidden` to 403,
+/// `Internal` to 500; the MCP surface flattens all into `isError` results.
+pub enum ActionError {
+    Bad(String),
+    Forbidden(String),
+    Internal(String),
+}
+
+/// Shared action routing used by `POST /invoke` and the MCP `tools/call`.
+/// `params` holds the action's arguments; unknown extra keys are ignored.
+pub async fn dispatch_action(
+    action: &str,
+    params: &Value,
+    scan_authorized: bool,
+) -> std::result::Result<Value, ActionError> {
+    if SCAN_ACTIONS.contains(&action) && !scan_authorized {
+        return Err(ActionError::Forbidden(format!(
+            "action '{action}' requires scan authorization; restart firelin serve with \
+             --yes-i-have-permission or set FIRELIN_I_HAVE_PERMISSION=yes — only scan targets \
+             you own or are authorized to test"
+        )));
+    }
+    let outcome = match action {
+        "portscan" => action_portscan(params).await,
+        "subdns" => action_subdns(params).await,
+        "dirscan" => action_dirscan(params).await,
+        "fingerprint" => action_fingerprint(params).await,
+        "cidr" => action_cidr(params),
+        other => {
+            return Err(ActionError::Bad(format!(
+                "unknown action '{other}' — expected one of: {}",
+                ACTIONS.join(", ")
+            )))
+        }
+    };
+    outcome.map_err(|message| match message {
+        ActionError::Bad(m) => ActionError::Bad(m),
+        other => other,
+    })
+}
+
+async fn action_portscan(params: &Value) -> std::result::Result<Value, ActionError> {
     let target = req_str(params, "target")?.to_string();
     let ports_spec = opt_str(params, "ports").unwrap_or("1-1024").to_string();
     let ports_list = ports::parse_ports(&ports_spec).map_err(bad_req)?;
@@ -191,10 +227,10 @@ async fn invoke_portscan(params: &Value) -> Result<Json<Value>, ApiError> {
     })
     .await
     .map_err(internal_blocking)?;
-    Ok(Json(serde_json::to_value(&result).map_err(internal_ser)?))
+    serde_json::to_value(&result).map_err(internal_ser)
 }
 
-async fn invoke_subdns(params: &Value) -> Result<Json<Value>, ApiError> {
+async fn action_subdns(params: &Value) -> std::result::Result<Value, ActionError> {
     let domain = req_str(params, "domain")?.to_string();
     let wordlist_spec = opt_str(params, "wordlist").unwrap_or("builtin").to_string();
     let resolver_spec = opt_str(params, "resolver")
@@ -209,10 +245,10 @@ async fn invoke_subdns(params: &Value) -> Result<Json<Value>, ApiError> {
     })
     .await
     .map_err(internal_blocking)?;
-    Ok(Json(serde_json::to_value(&result).map_err(internal_ser)?))
+    serde_json::to_value(&result).map_err(internal_ser)
 }
 
-async fn invoke_dirscan(params: &Value) -> Result<Json<Value>, ApiError> {
+async fn action_dirscan(params: &Value) -> std::result::Result<Value, ActionError> {
     let base_url = req_str(params, "url")?.to_string();
     dirscan::validate_base_url(&base_url).map_err(bad_req)?;
     let wordlist_spec = opt_str(params, "wordlist").unwrap_or("builtin").to_string();
@@ -225,39 +261,39 @@ async fn invoke_dirscan(params: &Value) -> Result<Json<Value>, ApiError> {
     })
     .await
     .map_err(internal_blocking)?;
-    Ok(Json(serde_json::to_value(&result).map_err(internal_ser)?))
+    serde_json::to_value(&result).map_err(internal_ser)
 }
 
-async fn invoke_fingerprint(params: &Value) -> Result<Json<Value>, ApiError> {
+async fn action_fingerprint(params: &Value) -> std::result::Result<Value, ActionError> {
     let url = req_str(params, "url")?.to_string();
     let timeout_ms = opt_u64(params, "timeout_ms", 5000);
     let result = tokio::task::spawn_blocking(move || fingerprint::fingerprint(&url, timeout_ms))
         .await
         .map_err(internal_blocking)?
         .map_err(internal_err)?;
-    Ok(Json(serde_json::to_value(&result).map_err(internal_ser)?))
+    serde_json::to_value(&result).map_err(internal_ser)
 }
 
-fn invoke_cidr(params: &Value) -> Result<Json<Value>, ApiError> {
+fn action_cidr(params: &Value) -> std::result::Result<Value, ActionError> {
     let spec = params
         .get("cidr")
         .and_then(Value::as_str)
         .or_else(|| params.get("target").and_then(Value::as_str))
-        .ok_or_else(|| bad_request("missing required string param 'cidr'"))?;
+        .ok_or_else(|| bad("missing required string param 'cidr'"))?;
     let parsed = cidr::parse_cidr(spec).map_err(bad_req)?;
     let addresses = cidr::expand(&parsed).map_err(bad_req)?;
-    Ok(Json(json!({
+    Ok(json!({
         "cidr": spec,
         "network": parsed.network.to_string(),
         "prefix": parsed.prefix,
         "count": addresses.len(),
         "addresses": addresses.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
-    })))
+    }))
 }
 
 // ---- helpers ------------------------------------------------------------
 
-fn authorized(headers: &HeaderMap, state: &AppState) -> bool {
+pub(crate) fn authorized(headers: &HeaderMap, state: &AppState) -> bool {
     match &state.token {
         None => true,
         Some(token) => headers
@@ -267,6 +303,10 @@ fn authorized(headers: &HeaderMap, state: &AppState) -> bool {
     }
 }
 
+fn bad(message: impl Into<String>) -> ActionError {
+    ActionError::Bad(message.into())
+}
+
 fn bad_request(message: impl Into<String>) -> ApiError {
     (
         StatusCode::BAD_REQUEST,
@@ -274,8 +314,8 @@ fn bad_request(message: impl Into<String>) -> ApiError {
     )
 }
 
-fn bad_req(e: anyhow::Error) -> ApiError {
-    bad_request(e.to_string())
+fn bad_req(e: anyhow::Error) -> ActionError {
+    ActionError::Bad(e.to_string())
 }
 
 fn unauthorized() -> ApiError {
@@ -285,33 +325,24 @@ fn unauthorized() -> ApiError {
     )
 }
 
-fn internal_blocking(e: tokio::task::JoinError) -> ApiError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": e.to_string()})),
-    )
+fn internal_blocking(e: tokio::task::JoinError) -> ActionError {
+    ActionError::Internal(e.to_string())
 }
 
-fn internal_err(e: anyhow::Error) -> ApiError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": e.to_string()})),
-    )
+fn internal_err(e: anyhow::Error) -> ActionError {
+    ActionError::Internal(e.to_string())
 }
 
-fn internal_ser(e: serde_json::Error) -> ApiError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": e.to_string()})),
-    )
+fn internal_ser(e: serde_json::Error) -> ActionError {
+    ActionError::Internal(e.to_string())
 }
 
-fn req_str<'a>(params: &'a Value, key: &str) -> std::result::Result<&'a str, ApiError> {
+fn req_str<'a>(params: &'a Value, key: &str) -> std::result::Result<&'a str, ActionError> {
     params
         .get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| bad_request(format!("missing required string param '{key}'")))
+        .ok_or_else(|| bad(format!("missing required string param '{key}'")))
 }
 
 fn opt_str<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
