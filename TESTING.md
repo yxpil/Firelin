@@ -1,3 +1,12 @@
+# Firelin 测试说明
+
+- 测试完成：是（2026-10-04）
+- 测试日期：2026-10-04
+- 测试内容：单元测试 34（CLI 解析/CIDR/端口/指纹/授权门）+ 集成测试 tests/cli.rs(11)、tests/mcp.rs(5)、tests/injection.rs(2)；注入：恶意 HTTP 响应（XSS/SQLi 载荷）当作不透明 JSON 数据往返、乱码输入干净拒绝不 panic；本仓库无插件/钩子机制。
+- 运行命令：`cargo test`
+- 测试框架：Rust `#[cfg(test)]` + 黑盒集成测试（真实二进制 + 本地桩）
+- 模型：豆包（Doubao）生成
+
 # 测试说明（Firelin）
 
 Firelin 是一个扫描器 CLI + 本地 HTTP/MCP 服务。测试分两层：`src/` 内的单元测试，
