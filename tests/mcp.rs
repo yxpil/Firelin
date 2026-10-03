@@ -40,6 +40,8 @@ fn spawn_serve(extra: &[&str]) -> ServeHandle {
     let child = Command::new(env!("CARGO_BIN_EXE_firelin"))
         .args(&args)
         .env_remove(PERMISSION_ENV)
+        // Close stdin (EOF) so serve's BIT-contract stdin reader never blocks.
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

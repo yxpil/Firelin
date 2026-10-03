@@ -552,6 +552,9 @@ fn spawn_serve(extra: &[&str]) -> (u16, std::process::Child) {
     let child = Command::new(env!("CARGO_BIN_EXE_firelin"))
         .args(&args)
         .env_remove(PERMISSION_ENV)
+        // serve reads stdin for the BIT exec contract when it is not a TTY;
+        // closing it (EOF) keeps the server from blocking before it binds.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
