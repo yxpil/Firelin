@@ -330,3 +330,15 @@ curl -H 'Authorization: Bearer sekrit' -X POST http://127.0.0.1:8755/invoke \
 ---
 
 Part of the [BIT](https://github.com/yxpil/bit) ecosystem.
+
+---
+
+<div align="center">
+
+<a href="https://github.com/yxpil/Firelin">
+  <img width="100%" src="https://alittlecatgirlpanel.yxp.hk/card?repo=yxpil/Firelin" alt="gh-card · yxpil/Firelin" />
+</a>
+
+<sub>Powered by <a href="https://alittlecatgirlpanel.yxp.hk"><b>gh-card</b></a> · 粉色手写体 README 仓库名片</sub>
+
+</div>
